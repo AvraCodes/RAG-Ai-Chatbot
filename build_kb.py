@@ -10,13 +10,27 @@ API_KEY = os.getenv("API_KEY")
 DB_PATH = "knowledge_base.db"
 
 async def get_embedding(text):
-    url = "https://aipipe.org/openai/v1/embeddings"
-    headers = {"Authorization": API_KEY, "Content-Type": "application/json"}
-    payload = {"model": "text-embedding-3-small", "input": text}
+    """Get embedding from Gemini API"""
+    url = "https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent"
+    headers = {
+        "Content-Type": "application/json",
+        "x-goog-api-key": API_KEY
+    }
+    payload = {
+        "model": "models/text-embedding-004",
+        "content": {
+            "parts": [{"text": text[:10000]}]  # Limit text length
+        }
+    }
     async with aiohttp.ClientSession() as session:
         async with session.post(url, headers=headers, json=payload) as resp:
-            data = await resp.json()
-            return data["data"][0]["embedding"]
+            if resp.status == 200:
+                data = await resp.json()
+                return data["embedding"]["values"]
+            else:
+                error = await resp.text()
+                print(f"Error getting embedding: {error}")
+                return None
 
 def chunk_text(text, chunk_size=500):
     # Simple chunking by words

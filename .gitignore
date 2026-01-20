@@ -1,25 +1,52 @@
-.vercel
 # Python
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
-
-# Virtual environments
-.venv/
-env/
+*.py[cod]
+*$py.class
+*.so
+.Python
 venv/
+.venv/
+ENV/
+env/
+*.egg-info/
+dist/
+build/
 
 # Environment variables
 .env
+.env.local
 
-# SQLite database files
+# Database
 *.db
+knowledge_base_backup.db
 
-# Jupyter Notebook checkpoints
-.ipynb_checkpoints/
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
 
-# macOS system files
+# OS
 .DS_Store
+Thumbs.db
 
-# VS Code
+# Logs
+*.log
+/tmp/
+
+# Next.js
+AI\ Chatbot\ Frontend/.next/
+AI\ Chatbot\ Frontend/out/
+AI\ Chatbot\ Frontend/node_modules/
+AI\ Chatbot\ Frontend/.turbo/
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Temporary files
+*.tmp
+*.temp

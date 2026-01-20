@@ -1,5 +1,6 @@
 fastapi
 uvicorn
+gunicorn
 python-dotenv
 aiohttp
 numpy
@@ -10,5 +11,5 @@ tqdm
 markdown
 python-multipart
 setuptools
-openai
-google-generativeai
+jinja2
+aiosqlite

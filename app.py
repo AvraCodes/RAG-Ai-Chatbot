@@ -9,7 +9,7 @@ import aiohttp
 import asyncio
 import logging
 import base64
-from fastapi import FastAPI, HTTPException, File, UploadFile, Form, Body, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
@@ -18,22 +18,26 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from dotenv import load_dotenv
 import traceback
 import uvicorn
+from functools import lru_cache
+import aiosqlite
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Constants
-DB_PATH = "knowledge_base.db"
-SIMILARITY_THRESHOLD = 0.68  # Lowered threshold for better recall
-MAX_RESULTS = 10  # Increased to get more context
+# Load environment variables
 load_dotenv()
-MAX_CONTEXT_CHUNKS = 4  # Increased number of chunks per source
-API_KEY = os.getenv("API_KEY")  # Get API key from environment variable
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
+# Constants - OPTIMIZED
+DB_PATH = "knowledge_base.db"
+SIMILARITY_THRESHOLD = 0.4  # ✅ Balanced for recall (lowered from 0.65)
+MAX_RESULTS = 8  # ✅ Reduced from 10
+MAX_CONTEXT_CHUNKS = 3  # ✅ Reduced from 4
+QUERY_LIMIT = 500  # ✅ Limit DB scan to top 500 chunks
+API_KEY = os.getenv("API_KEY")
 
+# ✅ Query embedding cache (in-memory)
+query_cache = {}
 
 # Models
 class QueryRequest(BaseModel):
@@ -48,18 +52,8 @@ class QueryResponse(BaseModel):
     answer: str
     links: List[LinkInfo]
 
-# Load Discourse posts
-with open("discourse_posts.json") as f:
-    discourse_posts = json.load(f)
-
-# Load course content (markdown files)
-course_docs = []
-for md_file in glob.glob("tds_pages_md/*.md"):
-    with open(md_file, encoding="utf-8") as f:
-        course_docs.append({"filename": md_file, "content": f.read()})
-
 # Initialize FastAPI app
-app = FastAPI(title="RAG Query API", description="API for querying the RAG knowledge base")
+app = FastAPI(title="TDS Virtual TA", description="Virtual Teaching Assistant for TDS course")
 
 # Add CORS middleware
 app.add_middleware(
@@ -70,87 +64,94 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Templates
+templates = Jinja2Templates(directory="templates")
+
 # Verify API key is set
 if not API_KEY:
     logger.error("API_KEY environment variable is not set. The application will not function correctly.")
 
-# Create a connection to the SQLite database
-def get_db_connection():
-    conn = None
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row  # This enables column access by name
-        return conn
-    except sqlite3.Error as e:
-        error_msg = f"Database connection error: {str(e)}"
-        logger.error(error_msg)
-        logger.error(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=error_msg)
+# Create database tables if they don't exist
+async def initialize_database():
+    """Initialize database with proper async/await"""
+    if not os.path.exists(DB_PATH):
+        async with aiosqlite.connect(DB_PATH) as conn:
+            await conn.execute('''
+            CREATE TABLE IF NOT EXISTS discourse_chunks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                post_id INTEGER,
+                topic_id INTEGER,
+                topic_title TEXT,
+                post_number INTEGER,
+                author TEXT,
+                created_at TEXT,
+                likes INTEGER,
+                chunk_index INTEGER,
+                content TEXT,
+                url TEXT,
+                embedding BLOB
+            )
+            ''')
+            
+            await conn.execute('''
+            CREATE TABLE IF NOT EXISTS markdown_chunks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                doc_title TEXT,
+                original_url TEXT,
+                downloaded_at TEXT,
+                chunk_index INTEGER,
+                content TEXT,
+                embedding BLOB
+            )
+            ''')
+            await conn.commit()
 
-# Make sure database exists or create it
-if not os.path.exists(DB_PATH):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    # Create discourse_chunks table
-    c.execute('''
-    CREATE TABLE IF NOT EXISTS discourse_chunks (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        post_id INTEGER,
-        topic_id INTEGER,
-        topic_title TEXT,
-        post_number INTEGER,
-        author TEXT,
-        created_at TEXT,
-        likes INTEGER,
-        chunk_index INTEGER,
-        content TEXT,
-        url TEXT,
-        embedding BLOB
-    )
-    ''')
-    
-    # Create markdown_chunks table
-    c.execute('''
-    CREATE TABLE IF NOT EXISTS markdown_chunks (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        doc_title TEXT,
-        original_url TEXT,
-        downloaded_at TEXT,
-        chunk_index INTEGER,
-        content TEXT,
-        embedding BLOB
-    )
-    ''')
-    conn.commit()
-    conn.close()
-
-# Vector similarity calculation with improved handling
+# Vector similarity calculation
 def cosine_similarity(vec1, vec2):
     try:
-        # Convert to numpy arrays
         vec1 = np.array(vec1)
         vec2 = np.array(vec2)
         
-        # Handle zero vectors
+        # Check dimension compatibility
+        if vec1.shape != vec2.shape:
+            logger.warning(f"Dimension mismatch: {vec1.shape} vs {vec2.shape} - skipping")
+            return 0.0
+        
         if np.all(vec1 == 0) or np.all(vec2 == 0):
             return 0.0
             
-        # Calculate cosine similarity
         dot_product = np.dot(vec1, vec2)
         norm_vec1 = np.linalg.norm(vec1)
         norm_vec2 = np.linalg.norm(vec2)
         
-        # Avoid division by zero
         if norm_vec1 == 0 or norm_vec2 == 0:
             return 0.0
             
-        return dot_product / (norm_vec1 * norm_vec2)
+        return float(dot_product / (norm_vec1 * norm_vec2))
     except Exception as e:
         logger.error(f"Error in cosine_similarity: {e}")
-        logger.error(traceback.format_exc())
-        return 0.0  # Return 0 similarity on error rather than crashing
+        return 0.0
 
-# Function to get embedding from aipipe proxy with retry mechanism
+# ✅ Cached query embedding to avoid recomputing identical queries
+async def get_query_embedding_cached(text):
+    """Get embedding with simple in-memory cache"""
+    cache_key = text.strip().lower()[:200]  # Use first 200 chars as key
+    
+    if cache_key in query_cache:
+        logger.info("✅ Cache hit for query embedding")
+        return query_cache[cache_key]
+    
+    embedding = await get_embedding(text)
+    query_cache[cache_key] = embedding
+    
+    # Keep cache size reasonable (max 100 queries)
+    if len(query_cache) > 100:
+        # Remove oldest entry
+        query_cache.pop(next(iter(query_cache)))
+    
+    return embedding
+
+# Function to get embedding using Gemini
 async def get_embedding(text, max_retries=3):
     if not API_KEY:
         error_msg = "API_KEY environment variable not set"
@@ -161,28 +162,31 @@ async def get_embedding(text, max_retries=3):
     while retries < max_retries:
         try:
             logger.info(f"Getting embedding for text (length: {len(text)})")
-            # Call the embedding API through aipipe proxy
-            url = "https://aipipe.org/openai/v1/embeddings"
+            
+            # Use Gemini embedding API
+            url = "https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent"
             headers = {
-                "Authorization": API_KEY,
-                "Content-Type": "application/json"
+                "Content-Type": "application/json",
+                "x-goog-api-key": API_KEY
             }
             payload = {
-                "model": "text-embedding-3-small",  # This must match your DB embedding model
-                "input": text
+                "model": "models/text-embedding-004",
+                "content": {
+                    "parts": [{"text": text}]
+                }
             }
             
-            logger.info("Sending request to embedding API")
+            logger.info("Sending request to Gemini embedding API")
             async with aiohttp.ClientSession() as session:
                 async with session.post(url, headers=headers, json=payload) as response:
                     if response.status == 200:
                         result = await response.json()
                         logger.info("Successfully received embedding")
-                        return result["data"][0]["embedding"]
-                    elif response.status == 429:  # Rate limit error
+                        return result["embedding"]["values"]
+                    elif response.status == 429:
                         error_text = await response.text()
                         logger.warning(f"Rate limit reached, retrying after delay (retry {retries+1}): {error_text}")
-                        await asyncio.sleep(5 * (retries + 1))  # Exponential backoff
+                        await asyncio.sleep(5 * (retries + 1))
                         retries += 1
                     else:
                         error_text = await response.text()
@@ -192,218 +196,171 @@ async def get_embedding(text, max_retries=3):
         except Exception as e:
             error_msg = f"Exception getting embedding (attempt {retries+1}/{max_retries}): {e}"
             logger.error(error_msg)
-            logger.error(traceback.format_exc())
             retries += 1
             if retries >= max_retries:
                 raise HTTPException(status_code=500, detail=error_msg)
-            await asyncio.sleep(3 * retries)  # Wait before retry
+            await asyncio.sleep(3 * retries)
 
-# Function to find similar content in the database with improved logic
+# ✅ OPTIMIZED: Function to find similar content - NO runtime embedding computation
 async def find_similar_content(query_embedding, conn):
+    """Find similar content using ONLY precomputed embeddings"""
     try:
         logger.info("Finding similar content in database")
-        cursor = conn.cursor()
         results = []
         
-        # Search discourse chunks
-        logger.info("Querying discourse chunks")
-        cursor.execute("""
+        # ✅ Search discourse chunks - ONLY those WITH embeddings
+        logger.info("Querying discourse_chunks table")
+        async with conn.execute("""
         SELECT id, post_id, topic_id, topic_title, post_number, author, created_at, 
                likes, chunk_index, content, url, embedding 
-        FROM discourse_chunks 
-        WHERE embedding IS NOT NULL
-        """)
+        FROM discourse_chunks
+        WHERE embedding IS NOT NULL AND embedding != ''
+        LIMIT ?
+        """, (QUERY_LIMIT,)) as cursor:
+            discourse_chunks = await cursor.fetchall()
         
-        discourse_chunks = cursor.fetchall()
         logger.info(f"Processing {len(discourse_chunks)} discourse chunks")
-        processed_count = 0
         
         for chunk in discourse_chunks:
             try:
-                embedding = json.loads(chunk["embedding"])
+                raw_emb = chunk[11]
+                # Parse embedding (stored as JSON)
+                try:
+                    embedding = json.loads(raw_emb)
+                except Exception:
+                    embedding = json.loads(raw_emb.decode() if isinstance(raw_emb, (bytes, bytearray)) else str(raw_emb))
+
                 similarity = cosine_similarity(query_embedding, embedding)
-                
                 if similarity >= SIMILARITY_THRESHOLD:
-                    # Ensure URL is properly formatted
-                    url = chunk["url"]
-                    if not url.startswith("http"):
-                        # Fix missing protocol
+                    url = chunk[10] or ""
+                    if url and not url.startswith("http"):
                         url = f"https://discourse.onlinedegree.iitm.ac.in/t/{url}"
-                    
                     results.append({
                         "source": "discourse",
-                        "id": chunk["id"],
-                        "post_id": chunk["post_id"],
-                        "topic_id": chunk["topic_id"],
-                        "title": chunk["topic_title"],
+                        "id": chunk[0],
+                        "content": chunk[9],
                         "url": url,
-                        "content": chunk["content"],
-                        "author": chunk["author"],
-                        "created_at": chunk["created_at"],
-                        "chunk_index": chunk["chunk_index"],
                         "similarity": float(similarity)
                     })
-                
-                processed_count += 1
-                if processed_count % 1000 == 0:
-                    logger.info(f"Processed {processed_count}/{len(discourse_chunks)} discourse chunks")
-                    
             except Exception as e:
-                logger.error(f"Error processing discourse chunk {chunk['id']}: {e}")
-        
-        # Search markdown chunks
-        logger.info("Querying markdown chunks")
-        cursor.execute("""
+                logger.error(f"Error processing discourse chunk {chunk[0] if chunk else 'unknown'}: {e}")
+
+        # ✅ Search markdown chunks - ONLY those WITH embeddings
+        logger.info("Querying markdown_chunks table")
+        async with conn.execute("""
         SELECT id, doc_title, original_url, downloaded_at, chunk_index, content, embedding 
-        FROM markdown_chunks 
-        WHERE embedding IS NOT NULL
-        """)
+        FROM markdown_chunks
+        WHERE embedding IS NOT NULL AND embedding != ''
+        LIMIT ?
+        """, (QUERY_LIMIT,)) as cursor:
+            markdown_chunks = await cursor.fetchall()
         
-        markdown_chunks = cursor.fetchall()
         logger.info(f"Processing {len(markdown_chunks)} markdown chunks")
-        processed_count = 0
-        
+
         for chunk in markdown_chunks:
             try:
-                embedding = json.loads(chunk["embedding"])
+                raw_emb = chunk[6]
+                try:
+                    embedding = json.loads(raw_emb)
+                except Exception:
+                    embedding = json.loads(raw_emb.decode() if isinstance(raw_emb, (bytes, bytearray)) else str(raw_emb))
+
                 similarity = cosine_similarity(query_embedding, embedding)
-                
                 if similarity >= SIMILARITY_THRESHOLD:
-                    # Ensure URL is properly formatted
-                    url = chunk["original_url"]
-                    if not url or not url.startswith("http"):
-                        # Use a default URL if missing
-                        url = f"https://docs.onlinedegree.iitm.ac.in/{chunk['doc_title']}"
-                    
+                    url = chunk[2] or "https://tds.s-anand.net/"
                     results.append({
                         "source": "markdown",
-                        "id": chunk["id"],
-                        "title": chunk["doc_title"],
+                        "id": chunk[0],
+                        "content": chunk[5],
                         "url": url,
-                        "content": chunk["content"],
-                        "chunk_index": chunk["chunk_index"],
                         "similarity": float(similarity)
                     })
-                
-                processed_count += 1
-                if processed_count % 1000 == 0:
-                    logger.info(f"Processed {processed_count}/{len(markdown_chunks)} markdown chunks")
-                    
             except Exception as e:
-                logger.error(f"Error processing markdown chunk {chunk['id']}: {e}")
-        
-        # Sort by similarity (descending)
+                logger.error(f"Error processing markdown chunk {chunk[0] if chunk else 'unknown'}: {e}")
+
+        # Sort and return top results
         results.sort(key=lambda x: x["similarity"], reverse=True)
-        logger.info(f"Found {len(results)} relevant results above threshold")
+        logger.info(f"Found {len(results)} relevant results above threshold {SIMILARITY_THRESHOLD}")
         
-        # Group by source document and keep most relevant chunks
-        grouped_results = {}
+        # Log top results for debugging
+        if results:
+            logger.info(f"Top result similarity: {results[0]['similarity']:.3f}")
+            logger.info(f"Top result preview: {results[0]['content'][:100]}...")
+        else:
+            logger.warning(f"No results found above threshold {SIMILARITY_THRESHOLD}")
+            logger.info(f"Total chunks scanned - Discourse: {len(discourse_chunks)}, Markdown: {len(markdown_chunks)}")
         
-        for result in results:
-            # Create a unique key for the document/post
-            if result["source"] == "discourse":
-                key = f"discourse_{result['post_id']}"
-            else:
-                key = f"markdown_{result['title']}"
-            
-            if key not in grouped_results:
-                grouped_results[key] = []
-            
-            grouped_results[key].append(result)
-        
-        # For each source, keep only the most relevant chunks
-        final_results = []
-        for key, chunks in grouped_results.items():
-            # Sort chunks by similarity
-            chunks.sort(key=lambda x: x["similarity"], reverse=True)
-            # Keep top chunks
-            final_results.extend(chunks[:MAX_CONTEXT_CHUNKS])
-        
-        # Sort again by similarity
-        final_results.sort(key=lambda x: x["similarity"], reverse=True)
-        
-        # Return top results, limited by MAX_RESULTS
-        logger.info(f"Returning {len(final_results[:MAX_RESULTS])} final results after grouping")
-        return final_results[:MAX_RESULTS]
+        return results[:MAX_RESULTS]
+
     except Exception as e:
         error_msg = f"Error in find_similar_content: {e}"
         logger.error(error_msg)
         logger.error(traceback.format_exc())
         raise
 
-# Function to enrich content with adjacent chunks
-async def enrich_with_adjacent_chunks(conn, results):
-    try:
-        logger.info(f"Enriching {len(results)} results with adjacent chunks")
-        cursor = conn.cursor()
-        enriched_results = []
-        
-        for result in results:
-            enriched_result = result.copy()
-            additional_content = ""
-            
-            # Try to get adjacent chunks for context
-            if result["source"] == "discourse":
-                post_id = result["post_id"]
-                current_chunk_index = result["chunk_index"]
-                
-                # Try to get previous chunk
-                if current_chunk_index > 0:
-                    cursor.execute("""
-                    SELECT content FROM discourse_chunks 
-                    WHERE post_id = ? AND chunk_index = ?
-                    """, (post_id, current_chunk_index - 1))
-                    prev_chunk = cursor.fetchone()
-                    if prev_chunk:
-                        additional_content = prev_chunk["content"] + " "
-                
-                # Try to get next chunk
-                cursor.execute("""
-                SELECT content FROM discourse_chunks 
-                WHERE post_id = ? AND chunk_index = ?
-                """, (post_id, current_chunk_index + 1))
-                next_chunk = cursor.fetchone()
-                if next_chunk:
-                    additional_content += " " + next_chunk["content"]
-                
-            elif result["source"] == "markdown":
-                title = result["title"]
-                current_chunk_index = result["chunk_index"]
-                
-                # Try to get previous chunk
-                if current_chunk_index > 0:
-                    cursor.execute("""
-                    SELECT content FROM markdown_chunks 
-                    WHERE doc_title = ? AND chunk_index = ?
-                    """, (title, current_chunk_index - 1))
-                    prev_chunk = cursor.fetchone()
-                    if prev_chunk:
-                        additional_content = prev_chunk["content"] + " "
-                
-                # Try to get next chunk
-                cursor.execute("""
-                SELECT content FROM markdown_chunks 
-                WHERE doc_title = ? AND chunk_index = ?
-                """, (title, current_chunk_index + 1))
-                next_chunk = cursor.fetchone()
-                if next_chunk:
-                    additional_content += " " + next_chunk["content"]
-            
-            # Add the enriched content
-            if additional_content:
-                enriched_result["content"] = f"{result['content']} {additional_content}"
-            
-            enriched_results.append(enriched_result)
-        
-        logger.info(f"Successfully enriched {len(enriched_results)} results")
-        return enriched_results
-    except Exception as e:
-        error_msg = f"Error in enrich_with_adjacent_chunks: {e}"
+# ✅ NEW: Fallback to LLM when no database results
+async def generate_answer_without_context(question, max_retries=2):
+    """Generate answer using LLM without RAG context"""
+    if not API_KEY:
+        error_msg = "API_KEY environment variable not set"
         logger.error(error_msg)
-        logger.error(traceback.format_exc())
-        raise
+        raise HTTPException(status_code=500, detail=error_msg)
+    
+    retries = 0
+    while retries < max_retries:
+        try:
+            logger.info(f"Generating LLM-only answer for: '{question[:50]}...'")
+            
+            prompt = f"""You are a helpful Teaching Assistant for the Tools in Data Science course at IIT Madras.
+            Answer the following question based on your general knowledge about data science, Python, and related tools.
+            If you're not confident about the answer, say so.
+            
+            Question: {question}
+            
+            Please provide a helpful and accurate answer:"""
+            
+            logger.info("Sending request to Gemini 2.5 Flash API (no context)")
+            url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+            headers = {
+                "Content-Type": "application/json",
+                "x-goog-api-key": API_KEY
+            }
+            payload = {
+                "contents": [{
+                    "parts": [{"text": prompt}]
+                }],
+                "generationConfig": {
+                    "temperature": 0.7,
+                    "maxOutputTokens": 1024
+                }
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, headers=headers, json=payload) as response:
+                    if response.status == 200:
+                        result = await response.json()
+                        logger.info("Successfully received LLM-only answer")
+                        return result["candidates"][0]["content"]["parts"][0]["text"]
+                    elif response.status == 429:
+                        error_text = await response.text()
+                        logger.warning(f"Rate limit reached, retrying (retry {retries+1}): {error_text}")
+                        await asyncio.sleep(3 * (retries + 1))
+                        retries += 1
+                    else:
+                        error_text = await response.text()
+                        error_msg = f"Error generating answer (status {response.status}): {error_text}"
+                        logger.error(error_msg)
+                        raise HTTPException(status_code=response.status, detail=error_msg)
+        except Exception as e:
+            error_msg = f"Exception generating LLM answer: {e}"
+            logger.error(error_msg)
+            logger.error(traceback.format_exc())
+            retries += 1
+            if retries >= max_retries:
+                raise HTTPException(status_code=500, detail=error_msg)
+            await asyncio.sleep(2)
 
-# Function to generate an answer using LLM with improved prompt
+# Function to generate answer using Gemini 2.5 Flash
 async def generate_answer(question, relevant_results, max_retries=2):
     if not API_KEY:
         error_msg = "API_KEY environment variable not set"
@@ -417,55 +374,46 @@ async def generate_answer(question, relevant_results, max_retries=2):
             context = ""
             for result in relevant_results:
                 source_type = "Discourse post" if result["source"] == "discourse" else "Documentation"
-                context += f"\n\n{source_type} (URL: {result['url']}):\n{result['content'][:1500]}"
+                context += f"\n\n{source_type} (URL: {result['url']}):\n{result['content'][:3000]}"
             
-            # Prepare improved prompt
-            prompt = f"""Answer the following question based ONLY on the provided context. 
-            If you cannot answer the question based on the context, say "I don't have enough information to answer this question."
+            prompt = f"""You are a helpful Teaching Assistant for the Tools in Data Science course at IIT Madras. 
+            Answer the following question using the provided context from course materials. Use the context as your primary source, but you can supplement with your general knowledge if needed to provide a complete answer.
             
             Context:
             {context}
             
             Question: {question}
             
-            Return your response in this exact format:
-            1. A comprehensive yet concise answer
-            2. A "Sources:" section that lists the URLs and relevant text snippets you used to answer
+            Please provide a clear, comprehensive answer. If the context is incomplete, use your knowledge to fill in gaps while noting what comes from the course materials.
             
-            Sources must be in this exact format:
-            Sources:
-            1. URL: [exact_url_1], Text: [brief quote or description]
-            2. URL: [exact_url_2], Text: [brief quote or description]
+            Answer:"""
             
-            Make sure the URLs are copied exactly from the context without any changes.
-            """
-            
-            logger.info("Sending request to LLM API")
-            # Call OpenAI API through aipipe proxy
-            url = "https://aipipe.org/openai/v1/chat/completions"
+            logger.info("Sending request to Gemini 2.5 Flash API")
+            url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
             headers = {
-                "Authorization": API_KEY,
-                "Content-Type": "application/json"
+                "Content-Type": "application/json",
+                "x-goog-api-key": API_KEY
             }
             payload = {
-                "model": "gpt-4o-mini",
-                "messages": [
-                    {"role": "system", "content": "You are a helpful assistant that provides accurate answers based only on the provided context. Always include sources in your response with exact URLs."},
-                    {"role": "user", "content": prompt}
-                ],
-                "temperature": 0.3  # Lower temperature for more deterministic outputs
+                "contents": [{
+                    "parts": [{"text": prompt}]
+                }],
+                "generationConfig": {
+                    "temperature": 0.5,
+                    "maxOutputTokens": 2048
+                }
             }
             
             async with aiohttp.ClientSession() as session:
                 async with session.post(url, headers=headers, json=payload) as response:
                     if response.status == 200:
                         result = await response.json()
-                        logger.info("Successfully received answer from LLM")
-                        return result["choices"][0]["message"]["content"]
-                    elif response.status == 429:  # Rate limit error
+                        logger.info("Successfully received answer from Gemini")
+                        return result["candidates"][0]["content"]["parts"][0]["text"]
+                    elif response.status == 429:
                         error_text = await response.text()
                         logger.warning(f"Rate limit reached, retrying after delay (retry {retries+1}): {error_text}")
-                        await asyncio.sleep(3 * (retries + 1))  # Exponential backoff
+                        await asyncio.sleep(3 * (retries + 1))
                         retries += 1
                     else:
                         error_text = await response.text()
@@ -479,9 +427,9 @@ async def generate_answer(question, relevant_results, max_retries=2):
             retries += 1
             if retries >= max_retries:
                 raise HTTPException(status_code=500, detail=error_msg)
-            await asyncio.sleep(2)  # Wait before retry
+            await asyncio.sleep(2)
 
-# Function to process multimodal content (text + image)
+# Function to process multimodal queries (with image)
 async def process_multimodal_query(question, image_base64):
     if not API_KEY:
         error_msg = "API_KEY environment variable not set"
@@ -490,232 +438,140 @@ async def process_multimodal_query(question, image_base64):
         
     try:
         logger.info(f"Processing query: '{question[:50]}...', image provided: {image_base64 is not None}")
+        
         if not image_base64:
             logger.info("No image provided, processing as text-only query")
             return await get_embedding(question)
         
         logger.info("Processing multimodal query with image")
-        # Call the GPT-4o Vision API to process the image and question
-        url = "https://aipipe.org/openai/v1/chat/completions"
-        headers = {
-            "Authorization": API_KEY,
-            "Content-Type": "application/json"
-        }
         
-        # Format the image for the API
-        image_content = f"data:image/jpeg;base64,{image_base64}"
+        # Use Gemini 2.5 Flash for vision analysis
+        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+        headers = {
+            "Content-Type": "application/json",
+            "x-goog-api-key": API_KEY
+        }
         
         payload = {
-            "model": "gpt-4o-mini",
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": f"Look at this image and tell me what you see related to this question: {question}"},
-                        {"type": "image_url", "image_url": {"url": image_content}}
-                    ]
-                }
-            ]
+            "contents": [{
+                "parts": [
+                    {"text": f"Analyze this image and describe what you see in relation to this question: {question}"},
+                    {
+                        "inline_data": {
+                            "mime_type": "image/jpeg",
+                            "data": image_base64
+                        }
+                    }
+                ]
+            }],
+            "generationConfig": {
+                "maxOutputTokens": 500
+            }
         }
         
-        logger.info("Sending request to Vision API")
+        logger.info("Sending request to Gemini Vision API")
         async with aiohttp.ClientSession() as session:
             async with session.post(url, headers=headers, json=payload) as response:
                 if response.status == 200:
                     result = await response.json()
-                    image_description = result["choices"][0]["message"]["content"]
+                    image_description = result["candidates"][0]["content"]["parts"][0]["text"]
                     logger.info(f"Received image description: '{image_description[:50]}...'")
                     
                     # Combine the original question with the image description
                     combined_query = f"{question}\nImage context: {image_description}"
                     
-                    # Get embedding for the combined query
-                    return await get_embedding(combined_query)
+                    # Get embedding for the combined query (cached)
+                    return await get_query_embedding_cached(combined_query)
                 else:
                     error_text = await response.text()
                     logger.error(f"Error processing image (status {response.status}): {error_text}")
                     # Fall back to text-only query
                     logger.info("Falling back to text-only query")
-                    return await get_embedding(question)
+                    return await get_query_embedding_cached(question)
     except Exception as e:
         logger.error(f"Exception processing multimodal query: {e}")
         logger.error(traceback.format_exc())
         # Fall back to text-only query
         logger.info("Falling back to text-only query due to exception")
-        return await get_embedding(question)
+        return await get_query_embedding_cached(question)
 
-# Function to parse LLM response and extract answer and sources with improved reliability
-def parse_llm_response(response):
-    try:
-        logger.info("Parsing LLM response")
-        
-        # First try to split by "Sources:" heading
-        parts = response.split("Sources:", 1)
-        
-        # If that doesn't work, try alternative formats
-        if len(parts) == 1:
-            # Try other possible headings
-            for heading in ["Source:", "References:", "Reference:"]:
-                if heading in response:
-                    parts = response.split(heading, 1)
-                    break
-        
-        answer = parts[0].strip()
-        links = []
-        
-        if len(parts) > 1:
-            sources_text = parts[1].strip()
-            source_lines = sources_text.split("\n")
-            
-            for line in source_lines:
-                line = line.strip()
-                if not line:
-                    continue
-                    
-                # Remove list markers (1., 2., -, etc.)
-                line = re.sub(r'^\d+\.\s*', '', line)
-                line = re.sub(r'^-\s*', '', line)
-                
-                # Extract URL and text using more flexible patterns
-                url_match = re.search(r'URL:\s*\[(.*?)\]|url:\s*\[(.*?)\]|\[(http[^\]]+)\]|URL:\s*(http\S+)|url:\s*(http\S+)|(http\S+)', line, re.IGNORECASE)
-                text_match = re.search(r'Text:\s*\[(.*?)\]|text:\s*\[(.*?)\]|[""](.*?)[""]|Text:\s*"(.*?)"|text:\s*"(.*?)"', line, re.IGNORECASE)
-                
-                if url_match:
-                    # Find the first non-None group from the regex match
-                    url = next((g for g in url_match.groups() if g), "")
-                    url = url.strip()
-                    
-                    # Default text if no match
-                    text = "Source reference"
-                    
-                    # If we found a text match, use it
-                    if text_match:
-                        # Find the first non-None group from the regex match
-                        text_value = next((g for g in text_match.groups() if g), "")
-                        if text_value:
-                            text = text_value.strip()
-                    
-                    # Only add if we have a valid URL
-                    if url and url.startswith("http"):
-                        links.append({"url": url, "text": text})
-        
-        logger.info(f"Parsed answer (length: {len(answer)}) and {len(links)} sources")
-        return {"answer": answer, "links": links}
-    except Exception as e:
-        error_msg = f"Error parsing LLM response: {e}"
-        logger.error(error_msg)
-        logger.error(traceback.format_exc())
-        # Return a basic response structure with the error
-        return {
-            "answer": "Error parsing the response from the language model.",
-            "links": []
-        }
-
-# Simple keyword search; replace with embedding search for better results
-def search_docs(question, docs, top_k=3):
-    results = []
-    for doc in docs:
-        if question.lower() in doc["content"].lower():
-            results.append(doc)
-    return results[:top_k]
-
-def search_posts(question, posts, top_k=3):
-    results = []
-    for post in posts:
-        if question.lower() in post["content"].lower():
-            results.append(post)
-    return results[:top_k]
-
-def build_context(question):
-    # Get relevant course docs and posts
-    docs = search_docs(question, course_docs)
-    posts = search_posts(question, discourse_posts)
-    context = ""
-    for doc in docs:
-        context += f"\n[Course] {doc['filename']}:\n{doc['content'][:500]}\n"
-    for post in posts:
-        context += f"\n[Discourse] {post['url']}:\n{post['content'][:500]}\n"
-    return context, posts
-
-@app.post("/api/")
-async def answer_question(req: QueryRequest):
-    context, posts = build_context(req.question)
-    prompt = (
-        f"You are a helpful teaching assistant. "
-        f"Answer the following question using the provided context. "
-        f"Question: {req.question}\n"
-        f"Context:\n{context}\n"
-        f"Answer:"
-    )
-    model = genai.GenerativeModel("gemini-pro")
-    response = await asyncio.to_thread(model.generate_content, prompt)
-    answer = response.text
-    links = [
-        {"url": post["url"], "text": post["content"][:80]}
-        for post in posts
-    ]
-    return {"answer": answer, "links": links}
-
-# Define API routes
+# Main API endpoint
 @app.post("/api")
-async def query_knowledge_base(
-    request: QueryRequest,
-    max_results: Optional[int] = MAX_RESULTS,
-    page: Optional[int] = 1,
-    debug: Optional[bool] = False
-):
+async def query_knowledge_base(request: QueryRequest):
+    logger.info(f"Received query request: question='{request.question[:50]}...', image_provided={bool(request.image)}")
+    
+    if not API_KEY:
+        logger.error("API_KEY environment variable is not set.")
+        raise HTTPException(status_code=500, detail="API_KEY environment variable is not set.")
+    
     try:
-        if not request.question or len(request.question.strip()) < 5:
-            return {
-                "answer": "The question must be at least 5 characters long.",
-                "links": []
-            }
-
-        logger.info(f"Received query request: question='{request.question[:50]}...', image_provided={request.image is not None}")
-
-        # Always use gpt-4o-mini with AI Pipe, regardless of question content
-        url = "https://aipipe.org/openai/v1/chat/completions"
-        headers = {
-            "Authorization": API_KEY,
-            "Content-Type": "application/json"
-        }
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": request.question}
-                ]
-            }
-        ]
-        # If image is present, add it to the message
-        if request.image:
-            image_content = f"data:image/webp;base64,{request.image}"
-            messages[0]["content"].append({"type": "image_url", "image_url": {"url": image_content}})
-
-        payload = {
-            "model": "gpt-4o-mini",
-            "messages": messages
-        }
-
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, headers=headers, json=payload) as response:
-                if response.status == 200:
-                    result = await response.json()
-                    answer = result["choices"][0]["message"]["content"]
-                    # You can add your RAG links logic here if needed
-                    return {"answer": answer, "links": []}
-                else:
-                    error_text = await response.text()
-                    logger.error(f"AI Pipe API error: {error_text}")
+        # Process the query (with or without image) - uses cache
+        query_embedding = await process_multimodal_query(request.question, request.image)
+        
+        # ✅ Search for similar content using async SQLite
+        async with aiosqlite.connect(DB_PATH) as conn:
+            results = await find_similar_content(query_embedding, conn)
+        
+        # ✅ Fallback to LLM if no database results
+        if not results:
+            logger.info("No relevant results found in database - using LLM fallback")
+            try:
+                answer = await generate_answer_without_context(request.question)
+                if answer:
                     return {
-                        "answer": "Sorry, I couldn't process your request due to an internal error.",
+                        "answer": answer + "\n\n*Note: This answer is generated without specific course context as no matching information was found in the knowledge base.*",
                         "links": []
                     }
+            except HTTPException as e:
+                if e.status_code == 429 or "quota" in str(e.detail).lower():
+                    logger.warning("Rate limit hit on LLM fallback")
+                    return {
+                        "answer": "I couldn't find specific information in the knowledge base, and the AI service is temporarily at capacity. Please try again in a few moments or rephrase your question.",
+                        "links": []
+                    }
+                logger.error(f"LLM fallback error: {e}")
+            
+            return {
+                "answer": "I couldn't find any relevant information in my knowledge base. Please try rephrasing your question or ask something more specific about the TDS course.",
+                "links": []
+            }
+        
+        # Generate answer using the most relevant chunks
+        logger.info(f"Found {len(results)} results, using top {min(len(results), MAX_CONTEXT_CHUNKS)} for context")
+        
+        # Create links from the results
+        links = []
+        for chunk in results[:MAX_CONTEXT_CHUNKS]:
+            if chunk.get("url"):
+                links.append({
+                    "url": chunk["url"], 
+                    "text": chunk["content"][:100] + "..." if len(chunk["content"]) > 100 else chunk["content"]
+                })
+        
+        # Try to generate answer, fallback to content summary if it fails
+        try:
+            answer = await generate_answer(request.question, results[:MAX_CONTEXT_CHUNKS])
+            if answer:
+                logger.info(f"Returning answer with {len(links)} links")
+                return {"answer": answer, "links": links}
+        except Exception as e:
+            logger.warning(f"Answer generation failed: {e}")
+        
+        # Fallback: Return content summary from most relevant chunks
+        logger.info("Using content summary fallback")
+        content_summary = "Based on the course materials, here's what I found:\n\n"
+        for i, chunk in enumerate(results[:MAX_CONTEXT_CHUNKS], 1):
+            content_summary += f"{i}. {chunk['content'][:300]}...\n\n"
+        content_summary += "\n*Note: AI answer generation is currently unavailable. The above is direct content from the knowledge base.*"
+        
+        logger.info(f"Returning content summary with {len(links)} links")
+        return {"answer": content_summary, "links": links}
+        
     except Exception as e:
         logger.error(f"Exception in query_knowledge_base: {e}")
         logger.error(traceback.format_exc())
         return {
-            "answer": "Sorry, I couldn't process your request due to an internal error.",
+            "answer": "Sorry, I encountered an error while processing your request. Please try again.", 
             "links": []
         }
 
@@ -723,25 +579,18 @@ async def query_knowledge_base(
 @app.get("/health")
 async def health_check():
     try:
-        # Try to connect to the database as part of health check
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        
-        # Check if tables exist and have data
-        cursor.execute("SELECT COUNT(*) FROM discourse_chunks")
-        discourse_count = cursor.fetchone()[0]
-        
-        cursor.execute("SELECT COUNT(*) FROM markdown_chunks")
-        markdown_count = cursor.fetchone()[0]
-        
-        # Check if any embeddings exist
-        cursor.execute("SELECT COUNT(*) FROM discourse_chunks WHERE embedding IS NOT NULL")
-        discourse_embeddings = cursor.fetchone()[0]
-        
-        cursor.execute("SELECT COUNT(*) FROM markdown_chunks WHERE embedding IS NOT NULL")
-        markdown_embeddings = cursor.fetchone()[0]
-        
-        conn.close()
+        async with aiosqlite.connect(DB_PATH) as conn:
+            async with conn.execute("SELECT COUNT(*) FROM discourse_chunks") as cursor:
+                discourse_count = (await cursor.fetchone())[0]
+            
+            async with conn.execute("SELECT COUNT(*) FROM markdown_chunks") as cursor:
+                markdown_count = (await cursor.fetchone())[0]
+            
+            async with conn.execute("SELECT COUNT(*) FROM discourse_chunks WHERE embedding IS NOT NULL AND embedding != ''") as cursor:
+                discourse_embeddings = (await cursor.fetchone())[0]
+            
+            async with conn.execute("SELECT COUNT(*) FROM markdown_chunks WHERE embedding IS NOT NULL AND embedding != ''") as cursor:
+                markdown_embeddings = (await cursor.fetchone())[0]
         
         return {
             "status": "healthy", 
@@ -759,14 +608,16 @@ async def health_check():
             content={"status": "unhealthy", "error": str(e), "api_key_set": bool(API_KEY)}
         )
 
-@app.get("/gemini-test")
-async def gemini_test():
-    try:
-        model = genai.GenerativeModel("gemini-pro")
-        response = await asyncio.to_thread(model.generate_content, "Hello, are you working?")
-        return {"answer": response.text}
-    except Exception as e:
-        return {"error": str(e)}
+@app.on_event("startup")
+async def startup_event():
+    """Initialize database on startup"""
+    await initialize_database()
+    logger.info("Database initialized")
+
+# Root endpoint to serve the web interface
+@app.get("/", response_class=HTMLResponse)
+async def root(request: Request):
+    return templates.TemplateResponse("index.html", {"request": request})
 
 if __name__ == "__main__":
     uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)
