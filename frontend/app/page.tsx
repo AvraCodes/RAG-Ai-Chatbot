@@ -97,22 +97,16 @@ export default function ChatPage() {
   return (
     <div className="flex h-screen flex-col bg-gradient-dark relative overflow-hidden">
       {/* Animated ambient glow effects */}
-      <div className="absolute top-0 left-1/4 w-[600px] h-[600px] bg-gradient-to-br from-indigo-500 to-purple-500 opacity-20 rounded-full blur-3xl pointer-events-none float-animation" />
-      <div className="absolute bottom-1/4 right-1/4 w-[500px] h-[500px] bg-gradient-to-br from-sky-500 to-blue-500 opacity-25 rounded-full blur-3xl pointer-events-none float-animation-delayed" />
-      <div className="absolute top-1/2 right-1/3 w-[400px] h-[400px] bg-gradient-to-br from-violet-500 to-purple-500 opacity-15 rounded-full blur-3xl pointer-events-none float-animation" style={{ animationDelay: '4s' }} />
-      <div className="absolute bottom-0 left-1/3 w-[450px] h-[450px] bg-gradient-to-br from-cyan-500 to-blue-500 opacity-15 rounded-full blur-3xl pointer-events-none float-animation-delayed" style={{ animationDelay: '1s' }} />
-      <div className="absolute top-1/3 left-1/2 w-[300px] h-[300px] bg-gradient-to-br from-pink-500 to-purple-500 opacity-10 rounded-full blur-3xl pointer-events-none float-animation" style={{ animationDelay: '6s' }} />
+      <div className="absolute top-0 left-1/4 w-[500px] h-[500px] bg-sky-400 opacity-15 rounded-full blur-3xl pointer-events-none float-animation" />
+      <div className="absolute bottom-1/4 right-1/4 w-[400px] h-[400px] bg-sky-500 opacity-20 rounded-full blur-3xl pointer-events-none float-animation-delayed" />
+      <div className="absolute top-1/2 right-1/3 w-[300px] h-[300px] bg-sky-300 opacity-10 rounded-full blur-3xl pointer-events-none float-animation" style={{ animationDelay: '4s' }} />
+      <div className="absolute bottom-0 left-1/3 w-[350px] h-[350px] bg-sky-600 opacity-10 rounded-full blur-3xl pointer-events-none float-animation-delayed" style={{ animationDelay: '1s' }} />
       
       {/* Header */}
-      <header className="flex h-16 items-center justify-between border-b border-border/30 px-6 glass-effect relative z-10">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-indigo-500 via-purple-500 to-pink-500 flex items-center justify-center shadow-lg">
-            <span className="text-white text-xl font-bold">✦</span>
-          </div>
-          <h1 className="text-lg font-bold bg-gradient-to-r from-indigo-400 via-purple-400 to-pink-400 bg-clip-text text-transparent tracking-tight">
-            TDS AI Assistant
-          </h1>
-        </div>
+      <header className="flex h-14 items-center justify-between border-b border-border/30 px-4 glass-effect relative z-10">
+        <h1 className="text-sm font-semibold text-foreground tracking-tight">
+          RAG AI Assistant
+        </h1>
         {messages.length > 0 && (
           <Button
             variant="ghost"

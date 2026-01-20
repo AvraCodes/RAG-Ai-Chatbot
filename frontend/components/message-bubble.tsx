@@ -19,9 +19,8 @@ export function MessageBubble({ message }: MessageBubbleProps) {
       }`}
     >
       {message.role === 'assistant' && (
-        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-indigo-500 via-purple-500 to-pink-500 text-white shadow-lg glow-green relative">
-          <div className="absolute inset-0 bg-gradient-to-br from-indigo-500 via-purple-500 to-pink-500 rounded-full blur-md opacity-50 animate-pulse"></div>
-          <Sparkles className="h-4 w-4 relative z-10" />
+        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-sky-400 to-sky-600 text-white shadow-lg glow-green">
+          <Sparkles className="h-4 w-4" />
         </div>
       )}
 
@@ -39,7 +38,7 @@ export function MessageBubble({ message }: MessageBubbleProps) {
         <div
           className={`rounded-2xl px-5 py-3.5 shadow-md transition-all duration-200 ${
             message.role === 'user'
-              ? 'bg-gradient-to-br from-indigo-500 via-purple-500 to-pink-500 text-white shadow-lg shadow-purple-500/30'
+              ? 'bg-gradient-to-br from-sky-500 to-sky-700 text-white glow-green'
               : 'glass-effect glass-border text-foreground'
           }`}
         >
@@ -77,7 +76,7 @@ export function MessageBubble({ message }: MessageBubbleProps) {
                     rel="noopener noreferrer"
                     className="group flex items-start gap-3 rounded-xl glass-effect glass-border p-3.5 transition-all duration-200 hover:scale-[1.02] hover:shadow-lg"
                   >
-                    <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-indigo-500 to-purple-500 text-white shadow-md">
+                    <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-sky-400 to-sky-600 text-white glow-green">
                       <ExternalLink className="h-3.5 w-3.5" />
                     </div>
                     <div className="flex-1 overflow-hidden">

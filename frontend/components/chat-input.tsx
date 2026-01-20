@@ -85,7 +85,7 @@ export function ChatInput({ onSendMessage, isLoading, disabled }: ChatInputProps
               onKeyDown={handleKeyDown}
               placeholder="Ask a question..."
               disabled={disabled}
-              className="min-h-[56px] max-h-[200px] resize-none rounded-2xl glass-effect glass-border pr-12 text-sm focus-visible:ring-2 focus-visible:ring-purple-500/50 focus-visible:border-purple-500/50 focus-visible:glow-effect transition-all duration-200 text-foreground placeholder:text-muted-foreground/70"
+              className="min-h-[56px] max-h-[200px] resize-none rounded-2xl glass-effect glass-border pr-12 text-sm focus-visible:ring-2 focus-visible:ring-sky-500/50 focus-visible:border-sky-500/50 focus-visible:glow-effect transition-all duration-200 text-foreground placeholder:text-muted-foreground/70"
               rows={1}
             />
             <input
@@ -110,13 +110,12 @@ export function ChatInput({ onSendMessage, isLoading, disabled }: ChatInputProps
             onClick={handleSubmit}
             disabled={!input.trim() || disabled}
             size="icon"
-            className="h-[56px] w-[56px] shrink-0 rounded-2xl bg-gradient-to-br from-indigo-500 via-purple-500 to-pink-500 hover:from-indigo-400 hover:via-purple-400 hover:to-pink-400 shadow-lg shadow-purple-500/50 hover:shadow-purple-500/70 hover:scale-105 transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100 relative overflow-hidden group"
+            className="h-[56px] w-[56px] shrink-0 rounded-2xl bg-gradient-to-br from-sky-500 to-sky-600 hover:from-sky-400 hover:to-sky-500 glow-green-strong hover:scale-105 transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100"
           >
-            <div className="absolute inset-0 bg-gradient-to-br from-white/20 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-200"></div>
             {isLoading ? (
-              <div className="h-5 w-5 animate-spin rounded-full border-2 border-white border-t-transparent relative z-10" />
+              <div className="h-5 w-5 animate-spin rounded-full border-2 border-white border-t-transparent" />
             ) : (
-              <ArrowUp className="h-5 w-5 relative z-10" />
+              <ArrowUp className="h-5 w-5" />
             )}
           </Button>
         </div>
