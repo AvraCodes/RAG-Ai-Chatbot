@@ -17,7 +17,7 @@ build/
 .env.local
 
 # Database
-*.db
+# *.db  # Commented out - including knowledge_base.db in repo
 knowledge_base_backup.db
 
 # IDE
