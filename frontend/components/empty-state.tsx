@@ -17,11 +17,14 @@ const exampleQuestions = [
 export function EmptyState({ onExampleClick }: EmptyStateProps) {
   return (
     <div className="flex min-h-[60vh] flex-col items-center justify-center animate-in fade-in duration-500">
-      <div className="mb-8 flex h-20 w-20 items-center justify-center rounded-full bg-gradient-to-br from-sky-400 to-sky-600 shadow-xl pulse-glow">
-        <Sparkles className="h-9 w-9 text-white" />
+      <div className="mb-8 relative">
+        <div className="absolute inset-0 bg-gradient-to-br from-indigo-500 via-purple-500 to-pink-500 rounded-full blur-2xl opacity-40 animate-pulse"></div>
+        <div className="relative flex h-24 w-24 items-center justify-center rounded-full bg-gradient-to-br from-indigo-500 via-purple-500 to-pink-500 shadow-2xl pulse-glow">
+          <Sparkles className="h-11 w-11 text-white" />
+        </div>
       </div>
 
-      <h2 className="mb-3 text-3xl font-bold text-foreground text-balance text-center tracking-tight">
+      <h2 className="mb-3 text-4xl font-bold bg-gradient-to-r from-indigo-400 via-purple-400 to-pink-400 bg-clip-text text-transparent text-balance text-center tracking-tight">
         Ask me anything
       </h2>
       <p className="mb-10 text-center text-muted-foreground/80 text-pretty max-w-md text-[15px] leading-relaxed">
@@ -33,7 +36,7 @@ export function EmptyState({ onExampleClick }: EmptyStateProps) {
           <Button
             key={index}
             variant="outline"
-            className="h-auto justify-start whitespace-normal p-4 text-left text-sm font-normal glass-effect glass-border hover:scale-[1.02] transition-all duration-200 hover:shadow-lg bg-transparent"
+            className="h-auto justify-start whitespace-normal p-4 text-left text-sm font-normal glass-effect glass-border hover:scale-[1.03] transition-all duration-300 hover:shadow-xl hover:shadow-purple-500/20 bg-transparent group relative overflow-hidden"
             onClick={() => onExampleClick(question)}
           >
             {question}
