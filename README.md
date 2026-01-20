@@ -153,7 +153,7 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 
 ```bash
 # Navigate to frontend directory
-cd "AI Chatbot Frontend"
+cd frontend
 
 # Install dependencies
 npm install
@@ -269,6 +269,27 @@ Main chatbot endpoint
 
 ### GET /health
 Health check endpoint
+
+## 🚦 Deploying to Vercel
+
+### Frontend Deployment
+
+1. **Import your repository** to Vercel
+2. **Configure project settings**:
+   - **Framework Preset**: Next.js
+   - **Root Directory**: `frontend`
+   - **Build Command**: `npm run build` (default)
+   - **Output Directory**: `.next` (default)
+3. **Add environment variables** (if needed for frontend)
+4. Deploy!
+
+### Backend Deployment
+
+The backend needs to be deployed separately (Railway, Render, or similar):
+
+1. Deploy FastAPI app to a Python hosting service
+2. Update frontend API proxy in `frontend/next.config.mjs` to point to your backend URL
+3. Set `GEMINI_API_KEY` environment variable in backend hosting
 
 ## 🚦 Running in Production
 
